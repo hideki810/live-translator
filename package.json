@@ -1,0 +1,12 @@
+{
+  "name": "live-translator",
+  "version": "1.3.0",
+  "private": true,
+  "description": "会議の日本語をリアルタイムで英語などに翻訳し続けるWebアプリ",
+  "scripts": {
+    "test": "node tests/simulate.test.js"
+  },
+  "devDependencies": {
+    "playwright": "1.48.2"
+  }
+}

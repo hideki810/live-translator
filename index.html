@@ -70,6 +70,10 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
 #msg{font-size:13px;color:var(--danger);margin-top:6px}
 .labelrow{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 #diag{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+#report{background:var(--panel);border-bottom:1px solid var(--line);padding-block:12px;display:grid;gap:8px}
+#report p{margin:0;font-size:13px;color:var(--muted);line-height:1.6}
+#report textarea{font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;width:100%;min-height:180px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--fg);padding:8px 10px}
+#report .row{display:flex;gap:8px;flex-wrap:wrap}
 
 </style>
 </head>
@@ -92,9 +96,16 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     <button id="jaToggle" aria-pressed="true">日本語表示</button>
     <button id="save">保存</button>
     <button id="clear">クリア</button>
+    <button id="diagBtn">診断</button>
     <button id="toggle">▶ 開始</button>
   </div>
 </header>
+
+<section id="report" class="wrap" hidden>
+  <p id="reportNote">不具合のときは、下の内容をコピーしてClaudeとのチャットに貼り付けてください。原因を調べるのに使います（会議の内容は入りません）。</p>
+  <textarea id="reportText" readonly aria-label="診断情報"></textarea>
+  <div class="row"><button id="copyReport" type="button">コピー</button><button id="closeReport" type="button">閉じる</button></div>
+</section>
 
 <main id="log" class="wrap" aria-live="polite">
   <div class="empty" id="empty">
@@ -127,12 +138,22 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
   const MAX_CHARS = 120;     // 長すぎる文は途中で区切って確定
   const INTERIM_MS = 1500;   // 話している途中の仮翻訳の間隔
   const STALL_MS = 20000;    // 認識中なのにこの時間何も届かなければ作り直す
+  const VERSION = '1.3.0';   // 変更したら上げる（画面下と診断情報に出る）
 
   let running = false, rec = null, active = false, restartTimer = null;
   let lastAlive = 0, lastHeard = 0, restarts = 0;
   let interim = '', silenceTimer = null, lastInterimSent = '', interimSeq = 0;
   let wakeLock = null, segments = [], lastCommit = { text: '', at: 0 };
   let googleBlockedUntil = 0;
+
+  // 診断用の記録（会議の中身は残さず、出来事と時刻だけを直近80件）
+  const events = [];
+  let startedAt = 0;
+  function note(m) {
+    const t = startedAt ? '+' + Math.round((Date.now() - startedAt) / 1000) + 's' : new Date().toLocaleTimeString('ja-JP');
+    events.push(t + ' ' + m);
+    if (events.length > 80) events.shift();
+  }
 
   // ---------- 保存された設定 ----------
   const store = {
@@ -158,6 +179,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
         const j = await r.json();
         return j[0].map(x => x[0]).join('');
       } catch (e) {
+        note('google-failed ' + (e.message || e) + ' -> mymemory 60s');
         googleBlockedUntil = Date.now() + 60000;   // 制限されたら1分間は予備のサービスを使う
       }
     }
@@ -181,7 +203,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     el.append(t, en, j); logEl.append(el);
     if (stick) logEl.scrollTop = logEl.scrollHeight;
     translate(ja).then(out => { seg.en = out; en.textContent = out; en.classList.remove('pending'); })
-      .catch(() => { en.textContent = '(translation failed — check the internet connection)'; })
+      .catch(e => { note('translate-failed ' + (e.message || e)); en.textContent = '(translation failed — check the internet connection)'; })
       .finally(() => { if (stick) logEl.scrollTop = logEl.scrollHeight; });
   }
 
@@ -245,6 +267,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     r.onstart = () => {
       if (rec !== r) return;
       active = true; lastAlive = lastHeard = Date.now();
+      note('onstart');
       setStatus('on', '翻訳中 / Live');
       showMsg('');
     };
@@ -261,6 +284,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     };
     r.onerror = e => {
       if (rec !== r) return;
+      note('onerror ' + e.error);
       if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
         stop();
         setStatus('err', 'マイク不可');
@@ -275,6 +299,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     r.onend = () => {
       if (rec !== r) return;
       rec = null; active = false;
+      note('onend');
       if (interim) commit(interim);
       if (!running) return;
       restarts++;
@@ -284,7 +309,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     };
     rec = r;
     lastAlive = Date.now();
-    try { r.start(); } catch (e) { rec = null; scheduleStart(1000); }
+    try { r.start(); } catch (e) { note('start-threw ' + e.name); rec = null; scheduleStart(1000); }
   }
 
   // 見張り役：止まっていたり、動いているのに何も聞こえていない状態が続いたら作り直す
@@ -292,14 +317,14 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     const now = Date.now();
     if (running) {
       if (!document.hidden) {
-        if (!rec && !restartTimer) startRec();                                   // 再開し損ねている
-        else if (rec && !active && now - lastAlive > 5000) startRec();           // 起動したまま固まっている
-        else if (rec && active && !interim && now - lastHeard > STALL_MS) {      // 聞こえなくなっている
-          restarts++; startRec();
+        if (!rec && !restartTimer) { note('watchdog: not running'); startRec(); }                         // 再開し損ねている
+        else if (rec && !active && now - lastAlive > 5000) { note('watchdog: start hung'); startRec(); } // 起動したまま固まっている
+        else if (rec && active && !interim && now - lastHeard > STALL_MS) {                              // 聞こえなくなっている
+          note('watchdog: stalled ' + Math.round((now - lastHeard) / 1000) + 's'); restarts++; startRec();
         }
       }
       const ago = lastHeard ? Math.round((now - lastHeard) / 1000) : 0;
-      $('diag').textContent = '再接続 ' + restarts + '回 · 最後の聞き取り ' + ago + '秒前';
+      $('diag').textContent = 'v' + VERSION + ' · 再接続 ' + restarts + '回 · 最後の聞き取り ' + ago + '秒前';
     }
   }, 2000);
 
@@ -316,11 +341,13 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
       return;
     }
     running = true; restarts = 0; lastHeard = Date.now();
+    startedAt = Date.now(); events.length = 0; note('start (android=' + IS_ANDROID + ')');
     $('toggle').textContent = '■ 停止'; $('toggle').classList.add('running');
     setStatus('restart', '起動中…');
     keepAwake(); startRec();
   }
   function stop() {
+    note('stop');
     running = false;
     clearTimeout(restartTimer); restartTimer = null;
     killRec();
@@ -334,6 +361,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
   }
 
   document.addEventListener('visibilitychange', () => {
+    if (running) note(document.hidden ? 'hidden' : 'visible');
     if (document.hidden || !running) return;
     keepAwake(); startRec();   // 画面に戻ったら作り直して再開
   });
@@ -358,6 +386,35 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     a.href = URL.createObjectURL(new Blob([txt], { type: 'text/plain;charset=utf-8' }));
     a.download = name; document.body.append(a); a.click(); a.remove();
   };
+
+  // 診断情報
+  function buildReport() {
+    const now = Date.now();
+    return [
+      '会議ライブ翻訳 診断 v' + VERSION,
+      '日時: ' + new Date().toLocaleString('ja-JP'),
+      '端末: ' + navigator.userAgent,
+      '音声認識: ' + (SR ? 'あり' : 'なし') + ' / Android方式: ' + IS_ANDROID + ' / 画面スリープ防止: ' + ('wakeLock' in navigator ? (wakeLock ? '有効' : '未取得') : '非対応'),
+      '状態: ' + (running ? '実行中' : '停止') + ' / 認識中: ' + active + ' / 再接続: ' + restarts + '回',
+      '最後の聞き取り: ' + (lastHeard ? Math.round((now - lastHeard) / 1000) + '秒前' : 'なし') + ' / 確定した文: ' + segments.length + '件',
+      '翻訳: ' + (now < googleBlockedUntil ? '予備サービス使用中' : 'Google'),
+      '--- 記録 ---'
+    ].concat(events).join('\n');
+  }
+  $('diagBtn').onclick = () => {
+    const box = $('report');
+    if (!box.hidden) { box.hidden = true; return; }
+    $('reportText').value = buildReport();
+    box.hidden = false;
+  };
+  $('copyReport').onclick = async () => {
+    const ta = $('reportText');
+    ta.value = buildReport();
+    try { await navigator.clipboard.writeText(ta.value); $('copyReport').textContent = 'コピーしました'; }
+    catch (e) { ta.focus(); ta.select(); $('copyReport').textContent = '選択しました（長押しでコピー）'; }
+    setTimeout(() => { $('copyReport').textContent = 'コピー'; }, 2500);
+  };
+  $('closeReport').onclick = () => { $('report').hidden = true; };
 })();
 </script>
 </body>
