@@ -7,6 +7,10 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#14181f">
 <title>会議ライブ翻訳</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-title" content="ライブ翻訳">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Noto+Sans+JP:wght@400;600&display=swap">
@@ -139,7 +143,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
   const MAX_CHARS = 120;     // 長すぎる文は途中で区切って確定
   const INTERIM_MS = 1500;   // 話している途中の仮翻訳の間隔
   const STALL_MS = 20000;    // 認識中なのにこの時間何も届かなければ作り直す
-  const VERSION = '1.3.1';   // 変更したら上げる（画面下と診断情報に出る）
+  const VERSION = '1.4.0';   // 変更したら上げる（画面下と診断情報に出る）
 
   let running = false, rec = null, active = false, restartTimer = null;
   let lastAlive = 0, lastHeard = 0, restarts = 0;
@@ -417,6 +421,11 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     setTimeout(() => { $('copyReport').textContent = 'コピー'; }, 2500);
   };
   $('closeReport').onclick = () => { $('report').hidden = true; };
+
+  // ホーム画面にインストールできるようにする（https で開いたときだけ動く）
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+    navigator.serviceWorker.register('sw.js').catch(e => note('sw-failed ' + e.message));
+  }
 })();
 </script>
 </body>
