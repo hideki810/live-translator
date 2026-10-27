@@ -70,6 +70,27 @@ async function open(browser, { ua, ...opts } = {}) {
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
 
+test('開いた直後：版の番号が見え、診断の欄は閉じている', async b => {
+  const t = await open(b, { ua: ANDROID_UA });
+  assert.match(await t.page.textContent('#diag'), /^v\d+\.\d+\.\d+$/);
+  assert.ok(await t.page.isVisible('#diag'), '版の番号が画面に出ている');
+  assert.strictEqual(await t.page.isVisible('#report'), false, '診断の欄は閉じている');
+  await t.page.click('#diagBtn');
+  assert.ok(await t.page.isVisible('#report'));
+  assert.match(await t.page.inputValue('#reportText'), /診断 v/);
+  await t.page.click('#closeReport');
+  assert.strictEqual(await t.page.isVisible('#report'), false);
+  return t;
+});
+
+test('停止したあとも版の番号が残る', async b => {
+  const t = await open(b, { ua: IPAD_UA });
+  await t.start(); await t.tick(2100);
+  await t.page.click('#toggle');
+  assert.match(await t.page.textContent('#diag'), /^v\d+\.\d+\.\d+$/);
+  return t;
+});
+
 test('確定した文が翻訳されて履歴に残る', async b => {
   const t = await open(b, { ua: IPAD_UA });
   await t.start();

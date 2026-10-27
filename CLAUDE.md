@@ -15,6 +15,7 @@
 - Android版Chromeは連続モードで同じ文が重複して届くため、`continuous=false` で1文ごとに区切ってすぐ再開する。5秒以内の同じ文は1回にまとめる。
 - iPad/iPhoneは確定（isFinal）が来ないことがあるので、1.8秒の無音か120文字で区切って確定し、認識を作り直す。
 - 診断情報には会議の中身（話した文）を入れない。出来事と時刻だけ。
+- 開閉する欄は `hidden` 属性で隠す。CSSで `display` を指定すると `hidden` が効かなくなるので、`[hidden]{display:none!important}` を消さない（v1.3.0で診断の欄が開きっぱなしになった）。
 
 ## 変更するときの手順
 1. `index.html` を直す。挙動を変えたら `VERSION`（`index.html` 内）と `package.json` の版を上げ、`CHANGELOG.md` に書く。
