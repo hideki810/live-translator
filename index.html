@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#14181f">
+<title>会議ライブ翻訳</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Noto+Sans+JP:wght@400;600&display=swap">
+<style>
+/* Layout: caption screen — fixed control bar on top, scrolling transcript, live line pinned at the bottom */
+:root{
+  --bg:#f6f7f9; --panel:#ffffff; --fg:#14181f; --muted:#5d6675; --line:#dfe3ea;
+  --accent:#0f6fd6; --accent-fg:#ffffff; --live:#c2410c; --ok:#15803d; --warn:#b45309; --danger:#b91c1c;
+  --font-en:"Atkinson Hyperlegible",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --font-ja:"Noto Sans JP","Hiragino Sans","Yu Gothic",system-ui,sans-serif;
+  --size:28px;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#14181f; --panel:#1c222c; --fg:#eef1f6; --muted:#9aa4b4; --line:#2c3441;
+  --accent:#4ea1ff; --accent-fg:#0b1220; --live:#fb923c; --ok:#4ade80; --warn:#fbbf24; --danger:#f87171;
+  color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#14181f; --panel:#1c222c; --fg:#eef1f6; --muted:#9aa4b4; --line:#2c3441;
+  --accent:#4ea1ff; --accent-fg:#0b1220; --live:#fb923c; --ok:#4ade80; --warn:#fbbf24; --danger:#f87171;
+  color-scheme:dark}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--font-ja);display:flex;flex-direction:column;
+  padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+.wrap{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+
+header{background:var(--panel);border-bottom:1px solid var(--line);padding-block:10px;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.brand{font-weight:600;font-size:15px;margin-right:auto;display:flex;align-items:center;gap:10px}
+.pill{font-size:12px;letter-spacing:.04em;padding:4px 10px;border-radius:999px;border:1px solid var(--line);color:var(--muted);display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.pill i{width:8px;height:8px;border-radius:50%;background:var(--muted);display:block}
+.pill.on{color:var(--ok);border-color:var(--ok)} .pill.on i{background:var(--ok);animation:pulse 1.4s infinite}
+.pill.restart{color:var(--warn);border-color:var(--warn)} .pill.restart i{background:var(--warn)}
+.pill.err{color:var(--danger);border-color:var(--danger)} .pill.err i{background:var(--danger)}
+@keyframes pulse{50%{opacity:.3}}
+@media (prefers-reduced-motion:reduce){.pill.on i{animation:none}}
+
+.controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+button,select{font:inherit;font-size:14px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:var(--fg);padding:8px 12px;min-height:40px;cursor:pointer}
+button:focus-visible,select:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+#toggle{background:var(--accent);color:var(--accent-fg);border-color:var(--accent);font-weight:600;padding:8px 18px;min-width:120px}
+#toggle.running{background:var(--danger);border-color:var(--danger);color:#fff}
+.icon{min-width:40px;padding:8px}
+
+main{flex:1;overflow-y:auto;padding-block:16px;display:flex;flex-direction:column;gap:18px;-webkit-overflow-scrolling:touch}
+.seg{display:flex;flex-direction:column;gap:4px;max-width:60ch}
+.seg .en{font-family:var(--font-en);font-size:var(--size);line-height:1.3;font-weight:700}
+.seg .ja{font-size:calc(var(--size)*.5);color:var(--muted);line-height:1.5}
+.seg .en.pending{color:var(--muted);font-weight:400}
+.seg time{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;letter-spacing:.04em}
+body.hide-ja .seg .ja, body.hide-ja #liveJa{display:none}
+.empty{color:var(--muted);max-width:52ch;line-height:1.7;font-size:15px}
+.empty b{color:var(--fg)}
+.empty .sample{margin-top:14px;padding:12px 14px;border:1px dashed var(--line);border-radius:12px}
+.empty .sample small{display:block;font-size:11px;letter-spacing:.06em;margin-bottom:4px}
+
+footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12px;min-height:96px}
+#liveEn{font-family:var(--font-en);font-size:calc(var(--size)*.9);line-height:1.3;color:var(--live);min-height:1.3em}
+#liveJa{font-size:calc(var(--size)*.5);color:var(--muted);margin-top:4px;min-height:1.4em}
+.label{font-size:11px;letter-spacing:.08em;color:var(--muted);margin-bottom:4px;text-transform:uppercase}
+#msg{font-size:13px;color:var(--danger);margin-top:6px}
+</style>
+</head>
+<body>
+<header class="wrap">
+  <div class="brand">会議ライブ翻訳 <span id="status" class="pill"><i></i><span>停止中 / Stopped</span></span></div>
+  <div class="controls">
+    <label for="lang" class="sr" hidden>翻訳先</label>
+    <select id="lang" aria-label="翻訳先の言語">
+      <option value="en">English</option>
+      <option value="vi">Tiếng Việt（ベトナム語）</option>
+      <option value="id">Bahasa Indonesia</option>
+      <option value="tl">Tagalog（フィリピン）</option>
+      <option value="my">မြန်မာ（ミャンマー語）</option>
+      <option value="ne">नेपाली（ネパール語）</option>
+      <option value="zh-CN">中文（简体）</option>
+    </select>
+    <button id="smaller" class="icon" aria-label="文字を小さく">A−</button>
+    <button id="bigger" class="icon" aria-label="文字を大きく">A＋</button>
+    <button id="jaToggle" aria-pressed="true">日本語表示</button>
+    <button id="save">保存</button>
+    <button id="clear">クリア</button>
+    <button id="toggle">▶ 開始</button>
+  </div>
+</header>
+
+<main id="log" class="wrap" aria-live="polite">
+  <div class="empty" id="empty">
+    <b>「▶ 開始」を一度押すだけで、会議が終わるまで聞き取りと翻訳を続けます。</b><br>
+    途中で音声認識が切れても自動で再開します。iPad・スマホは充電ケーブルにつなぎ、話す人の近くに置いてください。
+    <div class="sample"><small>表示例 / EXAMPLE</small>
+      <div class="seg"><div class="en">Let's start today's meeting. First, about the night-shift handover.</div>
+      <div class="ja">それでは今日の会議を始めます。まず夜勤の申し送りについてです。</div></div>
+    </div>
+  </div>
+</main>
+
+<footer class="wrap">
+  <div class="label">Now speaking / 話している内容</div>
+  <div id="liveEn"></div>
+  <div id="liveJa"></div>
+  <div id="msg" hidden></div>
+</footer>
+
+<script>
+(() => {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const $ = id => document.getElementById(id);
+  const logEl = $('log'), liveEn = $('liveEn'), liveJa = $('liveJa');
+
+  // Android版Chromeは連続モードで同じ文が重複して届く不具合があるため、
+  // 1文ごとに認識を終わらせてすぐ再開する方式に切り替える
+  const IS_ANDROID = /Android/i.test(navigator.userAgent);
+  const SILENCE_MS = 1800;   // 無音がこの時間続いたら1文として確定
+  const MAX_CHARS = 120;     // 長すぎる文は途中で区切って確定
+  const INTERIM_MS = 900;    // 話している途中の仮翻訳の間隔
+
+  let running = false, rec = null, gen = 0, active = false;
+  let interim = '', silenceTimer = null, interimTimer = null, lastInterimSent = '', interimSeq = 0;
+  let lastEventAt = 0, wakeLock = null, segments = [], lastCommit = { text: '', at: 0 };
+  let size = 28;
+  try { size = +localStorage.getItem('lt-size') || 28; $('lang').value = localStorage.getItem('lt-lang') || 'en'; } catch (e) {}
+  document.documentElement.style.setProperty('--size', size + 'px');
+
+  function setStatus(kind, text) {
+    const s = $('status'); s.className = 'pill ' + kind; s.lastElementChild.textContent = text;
+  }
+  function showMsg(t) { $('msg').hidden = !t; $('msg').textContent = t || ''; }
+
+  // ---------- 翻訳 ----------
+  async function translate(text) {
+    const tl = $('lang').value;
+    try {
+      const u = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=ja&tl=' + tl + '&dt=t&q=' + encodeURIComponent(text);
+      const r = await fetch(u);
+      if (!r.ok) throw new Error(r.status);
+      const j = await r.json();
+      return j[0].map(x => x[0]).join('');
+    } catch (e) {
+      const u = 'https://api.mymemory.translated.net/get?langpair=ja|' + tl.split('-')[0] + '&q=' + encodeURIComponent(text);
+      const r = await fetch(u);
+      const j = await r.json();
+      if (!j.responseData) throw new Error('translate failed');
+      return j.responseData.translatedText;
+    }
+  }
+
+  // ---------- 表示 ----------
+  function nearBottom() { return logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 120; }
+  function addSegment(ja) {
+    $('empty')?.remove();
+    const stick = nearBottom();
+    const seg = { ja, en: '', at: new Date() };
+    segments.push(seg);
+    const el = document.createElement('div'); el.className = 'seg';
+    const t = document.createElement('time'); t.textContent = seg.at.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const en = document.createElement('div'); en.className = 'en pending'; en.textContent = '…';
+    const j = document.createElement('div'); j.className = 'ja'; j.textContent = ja;
+    el.append(t, en, j); logEl.append(el);
+    if (stick) logEl.scrollTop = logEl.scrollHeight;
+    translate(ja).then(out => { seg.en = out; en.textContent = out; en.classList.remove('pending'); })
+      .catch(() => { en.textContent = '(translation failed — check the internet connection)'; })
+      .finally(() => { if (stick) logEl.scrollTop = logEl.scrollHeight; });
+  }
+
+  function commit(text) {
+    text = (text || '').trim();
+    // 同じ文が続けて届いたとき（Android で起きやすい）は1回だけ表示する
+    const dup = text && text === lastCommit.text && Date.now() - lastCommit.at < 5000;
+    if (text && !dup) { addSegment(text); lastCommit = { text, at: Date.now() }; }
+    interim = ''; lastInterimSent = ''; interimSeq++;
+    liveJa.textContent = ''; liveEn.textContent = '';
+  }
+
+  function onInterim(text) {
+    interim = text;
+    liveJa.textContent = text;
+    clearTimeout(silenceTimer);
+    if (!text) return;
+    if (text.length > MAX_CHARS) return forceCommit();
+    silenceTimer = setTimeout(forceCommit, SILENCE_MS);
+  }
+
+  // 一部の端末(iPhone/iPad)は「確定」を返さないことがあるため、無音で区切って確定し、認識を作り直す
+  function forceCommit() {
+    clearTimeout(silenceTimer);
+    if (!interim) return;
+    commit(interim);
+    restart(true);
+  }
+
+  // 話している途中の仮翻訳（間引いて送る）
+  interimTimer = setInterval(() => {
+    if (!running || !interim || interim === lastInterimSent) return;
+    lastInterimSent = interim;
+    const seq = ++interimSeq;
+    translate(interim).then(out => { if (seq === interimSeq) liveEn.textContent = out; }).catch(() => {});
+  }, INTERIM_MS);
+
+  // ---------- 音声認識（自動再開つき） ----------
+  function startRec() {
+    if (!running) return;
+    const my = ++gen;
+    const r = new SR();
+    r.lang = 'ja-JP'; r.continuous = !IS_ANDROID; r.interimResults = true; r.maxAlternatives = 1;
+    r.onstart = () => { if (my !== gen) return; active = true; lastEventAt = Date.now(); setStatus('on', '翻訳中 / Live'); showMsg(''); };
+    r.onresult = e => {
+      if (my !== gen) return;
+      lastEventAt = Date.now();
+      let tmp = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const res = e.results[i];
+        if (res.isFinal) { clearTimeout(silenceTimer); commit(res[0].transcript); }
+        else tmp += res[0].transcript;
+      }
+      onInterim(tmp);
+    };
+    r.onerror = e => {
+      if (my !== gen) return;
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        stop();
+        setStatus('err', 'マイク不可');
+        showMsg('マイクの使用が許可されていません。ブラウザの設定でマイクと音声認識を許可してから、もう一度「開始」を押してください。');
+      }
+      // no-speech / network / aborted などは onend で自動再開
+    };
+    r.onend = () => {
+      if (my !== gen) return;
+      active = false;
+      if (interim) commit(interim);
+      if (!running) return;
+      // Android は1文ごとに終わるのが正常なので、表示を変えずにすぐ再開する
+      if (IS_ANDROID) setTimeout(startRec, 50);
+      else { setStatus('restart', '再接続中…'); setTimeout(startRec, 200); }
+    };
+    rec = r;
+    try { r.start(); } catch (e) { setTimeout(startRec, 500); }
+  }
+
+  function restart(quiet) {
+    const old = rec; gen++; active = false;
+    try { old && old.abort(); } catch (e) {}
+    if (running) setTimeout(startRec, quiet ? 50 : 300);
+  }
+
+  // 見張り役：何らかの理由で止まっていたら再開する
+  setInterval(() => {
+    if (!running || document.hidden) return;
+    if (!active && Date.now() - lastEventAt > 4000) { lastEventAt = Date.now(); restart(); }
+  }, 2000);
+
+  async function keepAwake() {
+    try { if ('wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => wakeLock = null); } } catch (e) {}
+  }
+
+  function start() {
+    if (!SR) {
+      setStatus('err', '非対応');
+      showMsg(IS_ANDROID
+        ? 'このブラウザは音声認識に対応していません。Google Chrome で開いてください（Samsung Internet などは非対応です）。'
+        : 'このブラウザは音声認識に対応していません。iPad/iPhoneはSafari、AndroidはChromeで開いてください。');
+      return;
+    }
+    running = true; lastEventAt = Date.now();
+    $('toggle').textContent = '■ 停止'; $('toggle').classList.add('running');
+    setStatus('restart', '起動中…');
+    keepAwake(); startRec();
+  }
+  function stop() {
+    running = false; gen++; active = false;
+    try { rec && rec.abort(); } catch (e) {}
+    if (interim) commit(interim);
+    clearTimeout(silenceTimer);
+    $('toggle').textContent = '▶ 開始'; $('toggle').classList.remove('running');
+    setStatus('', '停止中 / Stopped');
+    try { wakeLock && wakeLock.release(); } catch (e) {}
+    wakeLock = null;
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden || !running) return;
+    keepAwake(); restart();   // 画面に戻ったら再開
+  });
+
+  // ---------- 操作 ----------
+  $('toggle').onclick = () => running ? stop() : start();
+  const setSize = s => { size = Math.max(16, Math.min(64, s)); document.documentElement.style.setProperty('--size', size + 'px'); try { localStorage.setItem('lt-size', size); } catch (e) {} };
+  $('bigger').onclick = () => setSize(size + 4);
+  $('smaller').onclick = () => setSize(size - 4);
+  $('lang').onchange = () => { try { localStorage.setItem('lt-lang', $('lang').value); } catch (e) {} };
+  $('jaToggle').onclick = e => { const on = document.body.classList.toggle('hide-ja'); e.target.setAttribute('aria-pressed', String(!on)); };
+  $('clear').onclick = () => {
+    if (segments.length && !$('clear').dataset.armed) { $('clear').dataset.armed = '1'; $('clear').textContent = 'もう一度押すと消去'; setTimeout(() => { delete $('clear').dataset.armed; $('clear').textContent = 'クリア'; }, 3000); return; }
+    delete $('clear').dataset.armed; $('clear').textContent = 'クリア';
+    segments = []; logEl.querySelectorAll('.seg').forEach(n => n.remove());
+  };
+  $('save').onclick = () => {
+    if (!segments.length) { showMsg('まだ保存する内容がありません。'); setTimeout(() => showMsg(''), 2500); return; }
+    const txt = segments.map(s => '[' + s.at.toLocaleTimeString('ja-JP') + ']\n' + s.ja + '\n' + s.en + '\n').join('\n');
+    const d = new Date(), name = 'meeting-' + d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0') + '.txt';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([txt], { type: 'text/plain;charset=utf-8' }));
+    a.download = name; document.body.append(a); a.click(); a.remove();
+  };
+})();
+</script>
+</body>
+</html>
