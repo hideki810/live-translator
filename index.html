@@ -71,17 +71,6 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
 .labelrow{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 #diag{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
 
-#settings{background:var(--panel);border-bottom:1px solid var(--line);padding-block:14px;display:grid;gap:14px;max-height:70vh;overflow-y:auto}
-#settings fieldset{border:0;margin:0;padding:0;display:grid;gap:8px;max-width:60ch;min-width:0}
-#settings legend{font-weight:600;font-size:14px;margin-bottom:6px}
-#settings .opt{display:flex;gap:8px;align-items:flex-start;font-size:14px;line-height:1.5}
-#settings .opt input{margin-top:4px}
-#settings .hint{font-size:12px;color:var(--muted);line-height:1.6}
-#settings input[type=password],#settings textarea,#settings select{font:inherit;font-size:16px;width:100%;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--fg);padding:8px 10px}
-#settings textarea{min-height:110px;resize:vertical}
-#settings .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-#testOut{font-size:13px;line-height:1.5;min-width:0}
-#testOut.ok{color:var(--ok)} #testOut.ng{color:var(--danger)}
 </style>
 </head>
 <body>
@@ -103,39 +92,9 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     <button id="jaToggle" aria-pressed="true">日本語表示</button>
     <button id="save">保存</button>
     <button id="clear">クリア</button>
-    <button id="openSettings" aria-expanded="false" aria-controls="settings">設定</button>
     <button id="toggle">▶ 開始</button>
   </div>
 </header>
-
-<section id="settings" class="wrap" hidden>
-  <fieldset>
-    <legend>翻訳のしかた</legend>
-    <label class="opt"><input type="radio" name="engine" id="engFree" value="free" checked>
-      <span><b>無料モード（Google翻訳）</b><br><span class="hint">登録不要。一文ずつ訳すので、話の流れや専門用語は苦手です。</span></span></label>
-    <label class="opt"><input type="radio" name="engine" id="engClaude" value="claude">
-      <span><b>高精度モード（Claude AI）</b><br><span class="hint">直前の発言の流れと用語集を参考にして、自然な訳にします。音声認識の聞き間違いも文脈から直します。APIキー（有料・使った分だけ）が必要です。</span></span></label>
-  </fieldset>
-  <fieldset>
-    <legend>高精度モードの設定</legend>
-    <label for="apiKey" class="hint">Anthropic APIキー（console.anthropic.com で作成できます）</label>
-    <input type="password" id="apiKey" placeholder="sk-ant-..." autocomplete="off" spellcheck="false">
-    <span class="hint">キーはこの端末のブラウザの中だけに保存されます。会社の共用端末では使わないでください。</span>
-    <label for="model" class="hint">AIモデル</label>
-    <select id="model">
-      <option value="claude-opus-5-5">Opus 5.5（いちばん正確）</option>
-      <option value="claude-haiku-5-5">Haiku 5.5（速くて安い）</option>
-    </select>
-    <span class="hint">料金の目安は、1時間の会議でOpus 5.5が約450円、Haiku 5.5が約15円です（話す量で変わります）。</span>
-    <div class="row"><button id="testKey" type="button">試しに翻訳する</button><span id="testOut" role="status"></span></div>
-  </fieldset>
-  <fieldset>
-    <legend>用語集（高精度モードで使います）</legend>
-    <label for="glossary" class="hint">1行に1つ「日本語=訳語」の形で書きます。施設名・人の名前・職場の言葉を登録すると、訳がぶれにくくなります。</label>
-    <textarea id="glossary" placeholder="申し送り=shift handover&#10;利用者様=resident&#10;夜勤=night shift&#10;ヒヤリハット=near-miss report"></textarea>
-  </fieldset>
-  <div class="row"><button id="closeSettings" type="button">閉じる</button></div>
-</section>
 
 <main id="log" class="wrap" aria-live="polite">
   <div class="empty" id="empty">
@@ -168,15 +127,12 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
   const MAX_CHARS = 120;     // 長すぎる文は途中で区切って確定
   const INTERIM_MS = 1500;   // 話している途中の仮翻訳の間隔
   const STALL_MS = 20000;    // 認識中なのにこの時間何も届かなければ作り直す
-  const CONTEXT_SEGMENTS = 4; // 高精度モードで参考にする直前の発言の数
-
-  const LANG_NAMES = { en: 'English', vi: 'Vietnamese', id: 'Indonesian', tl: 'Tagalog (Filipino)', my: 'Burmese', ne: 'Nepali', 'zh-CN': 'Simplified Chinese' };
 
   let running = false, rec = null, active = false, restartTimer = null;
   let lastAlive = 0, lastHeard = 0, restarts = 0;
   let interim = '', silenceTimer = null, lastInterimSent = '', interimSeq = 0;
   let wakeLock = null, segments = [], lastCommit = { text: '', at: 0 };
-  let googleBlockedUntil = 0, claudeBlockedUntil = 0, lastClaudeError = '';
+  let googleBlockedUntil = 0;
 
   // ---------- 保存された設定 ----------
   const store = {
@@ -186,20 +142,14 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
   let size = +store.get('lt-size', 28) || 28;
   document.documentElement.style.setProperty('--size', size + 'px');
   $('lang').value = store.get('lt-lang', 'en');
-  $('apiKey').value = store.get('lt-key', '');
-  $('model').value = store.get('lt-model', 'claude-opus-5-5');
-  $('glossary').value = store.get('lt-glossary', '');
-  (store.get('lt-engine', 'free') === 'claude' ? $('engClaude') : $('engFree')).checked = true;
-
-  const engine = () => $('engClaude').checked && $('apiKey').value.trim() ? 'claude' : 'free';
 
   function setStatus(kind, text) {
     const s = $('status'); s.className = 'pill ' + kind; s.lastElementChild.textContent = text;
   }
   function showMsg(t) { $('msg').hidden = !t; $('msg').textContent = t || ''; }
 
-  // ---------- 翻訳：無料モード ----------
-  async function freeTranslate(text) {
+  // ---------- 翻訳 ----------
+  async function translate(text) {
     const tl = $('lang').value;
     if (Date.now() > googleBlockedUntil) {
       try {
@@ -217,85 +167,11 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     return j.responseData.translatedText;
   }
 
-  // ---------- 翻訳：高精度モード（Claude） ----------
-  function glossaryText() {
-    return $('glossary').value.split('\n').map(l => l.trim()).filter(l => l.includes('=')).join('\n');
-  }
-
-  async function claudeTranslate(text, context) {
-    const model = $('model').value;
-    const target = LANG_NAMES[$('lang').value] || 'English';
-    const gl = glossaryText();
-    const system =
-      'You are a live interpreter at a meeting in a Japanese care facility (介護施設). ' +
-      'The Japanese comes from automatic speech recognition, so it may contain misheard words, missing punctuation, or a sentence cut in the middle. ' +
-      'Translate only the NEW utterance into ' + target + '. Use the earlier utterances only to understand the flow and to fix obvious recognition errors; do not translate them again. ' +
-      'If the new utterance continues a sentence that was cut off, translate it so it reads naturally as a continuation. ' +
-      'Write plain, natural ' + target + ' that non-native speakers can read quickly. Reply with the translation only, without notes, quotes, or the Japanese.' +
-      (gl ? '\n\nAlways use these fixed translations for these terms:\n' + gl : '');
-    const ctx = context.length
-      ? 'Earlier utterances (context only):\n' + context.map(s => '- ' + s.ja + (s.en ? ' → ' + s.en : '')).join('\n') + '\n\n'
-      : '';
-    const body = {
-      model,
-      max_tokens: 2048,
-      system,
-      output_config: { effort: 'low' },
-      messages: [{ role: 'user', content: ctx + 'NEW utterance:\n' + text }]
-    };
-    const headers = {
-      'content-type': 'application/json',
-      'x-api-key': $('apiKey').value.trim(),
-      'anthropic-version': '2026-10-21',
-      'anthropic-dangerous-direct-browser-access': 'true'
-    };
-    if (model === 'claude-opus-5-5') {
-      // 安全確認で断られたときに、別のモデルで自動的にやり直す
-      body.fallbacks = 'default';
-      headers['anthropic-beta'] = 'server-side-fallback-2026-07-01';
-    }
-    const r = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers, body: JSON.stringify(body) });
-    if (!r.ok) {
-      const err = new Error('claude ' + r.status); err.status = r.status;
-      try { err.detail = (await r.json()).error.message; } catch (e) {}
-      throw err;
-    }
-    const j = await r.json();
-    if (j.stop_reason === 'refusal') throw new Error('refusal');
-    const out = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join('').trim();
-    if (!out) throw new Error('empty');
-    return out;
-  }
-
-  function claudeErrorText(e) {
-    if (e.status === 401) return 'APIキーが正しくありません。設定を確認してください。';
-    if (e.status === 402 || (e.detail && /credit|billing/i.test(e.detail))) return 'APIの残高が足りません。console.anthropic.com で入金してください。';
-    if (e.status === 429) return 'APIの利用が混み合っています。少しのあいだ無料モードで訳します。';
-    return '高精度モードで訳せなかったため、無料モードで訳しました。';
-  }
-
-  async function translateFinal(text, context) {
-    if (engine() === 'claude' && Date.now() > claudeBlockedUntil) {
-      try {
-        const out = await claudeTranslate(text, context);
-        if (lastClaudeError) { lastClaudeError = ''; showMsg(''); }
-        return out;
-      } catch (e) {
-        lastClaudeError = claudeErrorText(e);
-        showMsg(lastClaudeError);
-        if (e.status === 401 || e.status === 402) claudeBlockedUntil = Date.now() + 10 * 60000;
-        else if (e.status === 429) claudeBlockedUntil = Date.now() + 30000;
-      }
-    }
-    return freeTranslate(text);
-  }
-
   // ---------- 表示 ----------
   function nearBottom() { return logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 120; }
   function addSegment(ja) {
     $('empty')?.remove();
     const stick = nearBottom();
-    const context = segments.slice(-CONTEXT_SEGMENTS);
     const seg = { ja, en: '', at: new Date() };
     segments.push(seg);
     const el = document.createElement('div'); el.className = 'seg';
@@ -304,7 +180,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     const j = document.createElement('div'); j.className = 'ja'; j.textContent = ja;
     el.append(t, en, j); logEl.append(el);
     if (stick) logEl.scrollTop = logEl.scrollHeight;
-    translateFinal(ja, context).then(out => { seg.en = out; en.textContent = out; en.classList.remove('pending'); })
+    translate(ja).then(out => { seg.en = out; en.textContent = out; en.classList.remove('pending'); })
       .catch(() => { en.textContent = '(translation failed — check the internet connection)'; })
       .finally(() => { if (stick) logEl.scrollTop = logEl.scrollHeight; });
   }
@@ -336,13 +212,13 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     startRec();
   }
 
-  // 話している途中の仮翻訳（間引いて送る。速さ優先で無料モードを使う）
+  // 話している途中の仮翻訳（間引いて送る）
   setInterval(() => {
     if (!running || !interim || interim === lastInterimSent) return;
     if (lastInterimSent && interim.length - lastInterimSent.length < 3 && interim.startsWith(lastInterimSent)) return;
     lastInterimSent = interim;
     const seq = ++interimSeq;
-    freeTranslate(interim).then(out => { if (seq === interimSeq) liveEn.textContent = out; }).catch(() => {});
+    translate(interim).then(out => { if (seq === interimSeq) liveEn.textContent = out; }).catch(() => {});
   }, INTERIM_MS);
 
   // ---------- 音声認識（自動再開つき） ----------
@@ -370,7 +246,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
       if (rec !== r) return;
       active = true; lastAlive = lastHeard = Date.now();
       setStatus('on', '翻訳中 / Live');
-      if (!lastClaudeError) showMsg('');
+      showMsg('');
     };
     r.onresult = e => {
       if (rec !== r) return;
@@ -423,7 +299,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
         }
       }
       const ago = lastHeard ? Math.round((now - lastHeard) / 1000) : 0;
-      $('diag').textContent = (engine() === 'claude' ? '高精度モード' : '無料モード') + ' · 再接続 ' + restarts + '回 · 最後の聞き取り ' + ago + '秒前';
+      $('diag').textContent = '再接続 ' + restarts + '回 · 最後の聞き取り ' + ago + '秒前';
     }
   }, 2000);
 
@@ -481,32 +357,6 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([txt], { type: 'text/plain;charset=utf-8' }));
     a.download = name; document.body.append(a); a.click(); a.remove();
-  };
-
-  // 設定パネル
-  const toggleSettings = open => { $('settings').hidden = !open; $('openSettings').setAttribute('aria-expanded', String(open)); };
-  $('openSettings').onclick = () => toggleSettings($('settings').hidden);
-  $('closeSettings').onclick = () => toggleSettings(false);
-  const saveSettings = () => {
-    store.set('lt-engine', $('engClaude').checked ? 'claude' : 'free');
-    store.set('lt-key', $('apiKey').value.trim());
-    store.set('lt-model', $('model').value);
-    store.set('lt-glossary', $('glossary').value);
-    claudeBlockedUntil = 0; lastClaudeError = '';
-  };
-  ['engFree', 'engClaude', 'model'].forEach(id => $(id).onchange = saveSettings);
-  ['apiKey', 'glossary'].forEach(id => $(id).oninput = saveSettings);
-  $('testKey').onclick = async () => {
-    const out = $('testOut');
-    if (!$('apiKey').value.trim()) { out.className = 'ng'; out.textContent = '先にAPIキーを入れてください。'; return; }
-    out.className = ''; out.textContent = '翻訳しています…';
-    try {
-      const t0 = Date.now();
-      const en = await claudeTranslate('じゃあ次、夜勤のもうし送りなんですけど、302号室の田中さん、昨日の夜あんまり寝れてなかったみたいです', []);
-      out.className = 'ok'; out.textContent = '成功（' + ((Date.now() - t0) / 1000).toFixed(1) + '秒）：' + en;
-    } catch (e) {
-      out.className = 'ng'; out.textContent = claudeErrorText(e) + (e.detail ? '（' + e.detail + '）' : '');
-    }
   };
 })();
 </script>
