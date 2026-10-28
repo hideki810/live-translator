@@ -131,6 +131,27 @@ test('動いているのに何も届かない状態が続くと作り直す', as
   return t;
 });
 
+test('Android：話しているのに何も返さず固まったら、8秒以内に作り直す', async b => {
+  const t = await open(b, { ua: ANDROID_UA });
+  await t.start();
+  const before = await t.recCount();
+  await t.tick(8000);
+  assert.ok((await t.recCount()) > before, '作り直された');
+  assert.strictEqual(await t.liveCount(), 1);
+  return t;
+});
+
+test('仮の訳は、話し声が途切れたら残らない', async b => {
+  const t = await open(b, { ua: ANDROID_UA });
+  await t.start();
+  await t.say([['結論から言うと', false]]);
+  await t.tick(1600);
+  assert.ok((await t.page.textContent('#liveEn')).length > 0);
+  await t.say([]);   // 仮の結果が空で届く
+  assert.strictEqual(await t.page.textContent('#liveEn'), '');
+  return t;
+});
+
 test('起動したのに開始の合図が来ないときも作り直す', async b => {
   const t = await open(b, { ua: IPAD_UA });
   await t.start();

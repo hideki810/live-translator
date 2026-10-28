@@ -142,8 +142,11 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
   const SILENCE_MS = 1800;   // 無音がこの時間続いたら1文として確定
   const MAX_CHARS = 120;     // 長すぎる文は途中で区切って確定
   const INTERIM_MS = 1500;   // 話している途中の仮翻訳の間隔
-  const STALL_MS = 20000;    // 認識中なのにこの時間何も届かなければ作り直す
-  const VERSION = '1.4.0';   // 変更したら上げる（画面下と診断情報に出る）
+  // 認識中なのにこの時間何も届かなければ作り直す。
+  // Android では、話し声が続いているのに認識が何も返さず固まることが実機の録画で分かった（v1.4.0で10〜20秒止まっていた）。
+  // 作り直しは一瞬なので、短めにして聞き逃しを減らす
+  const STALL_MS = IS_ANDROID ? 6000 : 10000;
+  const VERSION = '1.5.0';   // 変更したら上げる（画面下と診断情報に出る）
 
   let running = false, rec = null, active = false, restartTimer = null;
   let lastAlive = 0, lastHeard = 0, restarts = 0;
@@ -157,7 +160,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
   function note(m) {
     const t = startedAt ? '+' + Math.round((Date.now() - startedAt) / 1000) + 's' : new Date().toLocaleTimeString('ja-JP');
     events.push(t + ' ' + m);
-    if (events.length > 80) events.shift();
+    if (events.length > 200) events.shift();
   }
 
   // ---------- 保存された設定 ----------
@@ -227,7 +230,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     interim = text;
     liveJa.textContent = text;
     clearTimeout(silenceTimer);
-    if (!text) return;
+    if (!text) { liveEn.textContent = ''; interimSeq++; return; }   // 古い仮の訳を残さない
     if (text.length > MAX_CHARS) return forceCommit();
     silenceTimer = setTimeout(forceCommit, SILENCE_MS);
   }
@@ -255,7 +258,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     const r = rec;
     rec = null; active = false;
     if (!r) return;
-    r.onstart = r.onresult = r.onerror = r.onend = null;
+    r.onstart = r.onresult = r.onerror = r.onend = r.onaudiostart = r.onspeechstart = r.onspeechend = r.onnomatch = null;
     try { r.abort(); } catch (e) {}
   }
 
@@ -277,8 +280,13 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
       setStatus('on', '翻訳中 / Live');
       showMsg('');
     };
+    r.onaudiostart = () => { if (rec === r) note('audiostart'); };
+    r.onspeechstart = () => { if (rec === r) note('speechstart'); };
+    r.onspeechend = () => { if (rec === r) note('speechend'); };
+    r.onnomatch = () => { if (rec === r) note('nomatch'); };
     r.onresult = e => {
       if (rec !== r) return;
+      if (!r.gotResult) { r.gotResult = true; note('result'); }
       lastAlive = lastHeard = Date.now();
       let tmp = '';
       for (let i = e.resultIndex; i < e.results.length; i++) {
@@ -318,7 +326,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     try { r.start(); } catch (e) { note('start-threw ' + e.name); rec = null; scheduleStart(1000); }
   }
 
-  // 見張り役：止まっていたり、動いているのに何も聞こえていない状態が続いたら作り直す
+  // 見張り役（1秒ごと）：止まっていたり、動いているのに何も聞こえていない状態が続いたら作り直す
   setInterval(() => {
     const now = Date.now();
     if (running) {
@@ -332,7 +340,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
       const ago = lastHeard ? Math.round((now - lastHeard) / 1000) : 0;
       $('diag').textContent = 'v' + VERSION + ' · 再接続 ' + restarts + '回 · 最後の聞き取り ' + ago + '秒前';
     }
-  }, 2000);
+  }, 1000);
 
   async function keepAwake() {
     try { if ('wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => wakeLock = null); } } catch (e) {}
