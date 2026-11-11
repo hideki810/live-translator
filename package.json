@@ -7,6 +7,6 @@
     "test": "node tests/simulate.test.js"
   },
   "devDependencies": {
-    "playwright": "1.48.2"
+    "playwright": "1.63.0"
   }
 }
