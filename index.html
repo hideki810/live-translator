@@ -139,17 +139,23 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
   // Android版Chromeは連続モードで同じ文が重複して届く不具合があるため、
   // 1文ごとに認識を終わらせてすぐ再開する方式に切り替える
   const IS_ANDROID = /Android/i.test(navigator.userAgent);
-  const SILENCE_MS = 1800;   // 無音がこの時間続いたら1文として確定
+  // iPadOS は「Mac」と名乗ることがあるので、タッチ画面の有無でも見分ける
+  const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  // 無音がこの時間続いたら1文として確定する。
+  // Android は自分で文を確定してくれるので、それを待つために長めにする（早く切ると言葉が抜ける）
+  const SILENCE_MS = IS_ANDROID ? 3000 : 1800;
   const MAX_CHARS = 120;     // 長すぎる文は途中で区切って確定
   const INTERIM_MS = 1500;   // 話している途中の仮翻訳の間隔
   // 認識中なのにこの時間何も届かなければ作り直す。
   // Android では、話し声が続いているのに認識が何も返さず固まることが実機の録画で分かった（v1.4.0で10〜20秒止まっていた）。
   // 作り直しは一瞬なので、短めにして聞き逃しを減らす
-  const STALL_MS = IS_ANDROID ? 6000 : 10000;
-  const VERSION = '1.5.0';   // 変更したら上げる（画面下と診断情報に出る）
+  const STALL_MS = IS_ANDROID ? 6000 : 8000;
+  const HUNG_MS = 4000;      // 起動の合図がこの時間来なければ作り直す
+  const VERSION = '1.6.0';   // 変更したら上げる（画面下と診断情報に出る）
 
   let running = false, rec = null, active = false, restartTimer = null;
   let lastAlive = 0, lastHeard = 0, restarts = 0;
+  let everWorked = false, needTap = false, quickFails = 0;
   let interim = '', silenceTimer = null, lastInterimSent = '', interimSeq = 0;
   let wakeLock = null, segments = [], lastCommit = { text: '', at: 0 };
   let googleBlockedUntil = 0;
@@ -275,7 +281,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     r.lang = 'ja-JP'; r.continuous = !IS_ANDROID; r.interimResults = true; r.maxAlternatives = 1;
     r.onstart = () => {
       if (rec !== r) return;
-      active = true; lastAlive = lastHeard = Date.now();
+      active = true; everWorked = true; lastAlive = lastHeard = Date.now();
       note('onstart');
       setStatus('on', '翻訳中 / Live');
       showMsg('');
@@ -288,11 +294,18 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
       if (rec !== r) return;
       if (!r.gotResult) { r.gotResult = true; note('result'); }
       lastAlive = lastHeard = Date.now();
+      quickFails = 0;
+      // 端末ごとの癖に左右されないよう、「この回の認識で何番目まで確定したか」を自分で数える。
+      // （iPhone/iPad は確定済みの文をもう一度送ってくることがあり、番号を信じると同じ文が何度も出る）
       let tmp = '';
-      for (let i = e.resultIndex; i < e.results.length; i++) {
+      for (let i = 0; i < e.results.length; i++) {
         const res = e.results[i];
-        if (res.isFinal) commit(res[0].transcript);
-        else tmp += res[0].transcript;
+        const text = res[0].transcript;
+        // Android には、話している途中の結果を「確定・確信度0」で送ってくる機種がある。途中経過として扱う
+        const final = res.isFinal && !(IS_ANDROID && res[0].confidence === 0);
+        if (i < r.nextFinal) continue;
+        if (final) { commit(text); r.nextFinal = i + 1; }
+        else tmp += text;
       }
       onInterim(tmp);
     };
@@ -300,9 +313,21 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
       if (rec !== r) return;
       note('onerror ' + e.error);
       if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-        stop();
-        setStatus('err', 'マイク不可');
-        showMsg('マイクの使用が許可されていません。ブラウザの設定でマイクと音声認識を許可してから、もう一度「開始」を押してください。');
+        if (everWorked) {
+          // さっきまで動いていたのに断られた：端末が「画面を触るまで再開させない」ことがある（iPhone/iPad など）。
+          // 止めてしまわず、画面を一度タップしてもらえば続きから再開する
+          needTap = true;
+          killRec();
+          note('need-tap');
+          setStatus('restart', 'タップで再開');
+          showMsg('聞き取りが一時停止しました。画面のどこかを一度タップすると再開します。');
+        } else {
+          stop();
+          setStatus('err', 'マイク不可');
+          showMsg(IS_IOS
+            ? 'マイクか音声入力が許可されていません。「設定」→「一般」→「キーボード」→「音声入力」をオンにし、Safariでこのページのマイクを許可してから、もう一度「開始」を押してください。'
+            : 'マイクの使用が許可されていません。ブラウザの設定でマイクと音声認識を許可してから、もう一度「開始」を押してください。');
+        }
       } else if (e.error === 'audio-capture') {
         showMsg('マイクが使えません。ほかのアプリがマイクを使っていないか確認してください。自動で再開を続けます。');
       } else if (e.error === 'network') {
@@ -318,10 +343,16 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
       if (!running) return;
       restarts++;
       if (!IS_ANDROID) setStatus('restart', '再接続中…');
-      // Android は1文ごとに終わるのが正常なので、すぐ再開する
-      scheduleStart(IS_ANDROID ? 50 : 250);
+      // 何も聞き取れないまま一瞬で終わることが続くときは、再開の間隔を少しずつ空ける
+      // （通信やマイクの不調のときに、休みなく作り直して電池と通信を使い続けないため）
+      const quick = !r.gotResult && Date.now() - r.startedAt < 1500;
+      quickFails = quick ? quickFails + 1 : 0;
+      // Android は1文ごとに終わるのが正常なので、ふだんはすぐ再開する
+      const base = IS_ANDROID ? 50 : 250;
+      scheduleStart([base, base, 500, 1000, 2000, 4000][Math.min(quickFails, 5)]);
     };
     rec = r;
+    r.nextFinal = 0; r.startedAt = Date.now();
     lastAlive = Date.now();
     try { r.start(); } catch (e) { note('start-threw ' + e.name); rec = null; scheduleStart(1000); }
   }
@@ -330,9 +361,9 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
   setInterval(() => {
     const now = Date.now();
     if (running) {
-      if (!document.hidden) {
+      if (!document.hidden && !needTap) {
         if (!rec && !restartTimer) { note('watchdog: not running'); startRec(); }                         // 再開し損ねている
-        else if (rec && !active && now - lastAlive > 5000) { note('watchdog: start hung'); startRec(); } // 起動したまま固まっている
+        else if (rec && !active && now - lastAlive > HUNG_MS) { note('watchdog: start hung'); startRec(); } // 起動したまま固まっている
         else if (rec && active && !interim && now - lastHeard > STALL_MS) {                              // 聞こえなくなっている
           note('watchdog: stalled ' + Math.round((now - lastHeard) / 1000) + 's'); restarts++; startRec();
         }
@@ -354,7 +385,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
         : 'このブラウザは音声認識に対応していません。iPad/iPhoneはSafari、AndroidはChromeで開いてください。');
       return;
     }
-    running = true; restarts = 0; lastHeard = Date.now();
+    running = true; restarts = 0; lastHeard = Date.now(); needTap = false; quickFails = 0;
     startedAt = Date.now(); events.length = 0; note('start (android=' + IS_ANDROID + ')');
     $('toggle').textContent = '■ 停止'; $('toggle').classList.add('running');
     setStatus('restart', '起動中…');
@@ -362,7 +393,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
   }
   function stop() {
     note('stop');
-    running = false;
+    running = false; needTap = false;
     clearTimeout(restartTimer); restartTimer = null;
     killRec();
     if (interim) commit(interim);
@@ -374,9 +405,17 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     wakeLock = null;
   }
 
+  // 「タップで再開」の状態のときは、画面のどこを触っても聞き取りを再開する
+  document.addEventListener('pointerdown', () => {
+    if (!running || !needTap) return;
+    needTap = false; note('tap-resume');
+    setStatus('restart', '再接続中…'); showMsg('');
+    startRec();
+  });
+
   document.addEventListener('visibilitychange', () => {
     if (running) note(document.hidden ? 'hidden' : 'visible');
-    if (document.hidden || !running) return;
+    if (document.hidden || !running || needTap) return;
     keepAwake(); startRec();   // 画面に戻ったら作り直して再開
   });
 
@@ -408,7 +447,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
       '会議ライブ翻訳 診断 v' + VERSION,
       '日時: ' + new Date().toLocaleString('ja-JP'),
       '端末: ' + navigator.userAgent,
-      '音声認識: ' + (SR ? 'あり' : 'なし') + ' / Android方式: ' + IS_ANDROID + ' / 画面スリープ防止: ' + ('wakeLock' in navigator ? (wakeLock ? '有効' : '未取得') : '非対応'),
+      '音声認識: ' + (SR ? 'あり' : 'なし') + ' / 方式: ' + (IS_ANDROID ? 'Android' : IS_IOS ? 'iOS' : '標準') + ' / 画面スリープ防止: ' + ('wakeLock' in navigator ? (wakeLock ? '有効' : '未取得') : '非対応'),
       '状態: ' + (running ? '実行中' : '停止') + ' / 認識中: ' + active + ' / 再接続: ' + restarts + '回',
       '最後の聞き取り: ' + (lastHeard ? Math.round((now - lastHeard) / 1000) + '秒前' : 'なし') + ' / 確定した文: ' + segments.length + '件',
       '翻訳: ' + (now < googleBlockedUntil ? '予備サービス使用中' : 'Google'),

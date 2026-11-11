@@ -18,6 +18,10 @@ function fakes({ noSR = false, googleFails = false } = {}) {
       start() {
         if (window.__recs.filter(r => r.state === 'live').length) window.__twoLive = true;
         this.state = 'live';
+        if (window.__deny) {   // マイクを最初から断られた場合をまねる
+          setTimeout(() => { this.onerror && this.onerror({ error: 'not-allowed' }); this.state = 'dead'; this.onend && this.onend(); }, 10);
+          return;
+        }
         setTimeout(() => this.onstart && this.onstart(), 10);
       }
       abort() { this.state = 'dead'; setTimeout(() => this.onend && this.onend(), 10); }
@@ -51,16 +55,27 @@ async function open(browser, { ua, ...opts } = {}) {
     page, errors,
     tick: ms => page.clock.runFor(ms),
     // 今動いている認識に結果を届ける。[文字, 確定か] の配列
+    // 今動いている認識に結果を届ける。本物と同じく、確定した文は同じ回の中で積み上がっていく
     say: items => page.evaluate(items => {
       const r = window.__live().at(-1);
-      r.onresult({ resultIndex: 0, results: items.map(([t, f]) => Object.assign([{ transcript: t }], { isFinal: f })) });
+      r.__finals = r.__finals || [];
+      const mk = ([t, f]) => Object.assign([{ transcript: t, confidence: f ? 0.9 : 0 }], { isFinal: f });
+      const first = r.__finals.length;
+      const results = r.__finals.concat(items.map(mk));
+      r.__finals = results.filter(x => x.isFinal);
+      r.onresult({ resultIndex: first, results });
     }, items),
+    // 端末の癖をまねるため、結果の並びと番号をそのまま指定して届ける。[文字, 確定か, 確信度]
+    raw: (items, resultIndex = 0) => page.evaluate(({ items, resultIndex }) => {
+      const r = window.__live().at(-1);
+      r.onresult({ resultIndex, results: items.map(([t, f, c]) => Object.assign([{ transcript: t, confidence: c ?? (f ? 0.9 : 0) }], { isFinal: f })) });
+    }, { items, resultIndex }),
     endByItself: () => page.evaluate(() => { const r = window.__live().at(-1); r.state = 'dead'; r.onend(); }),
     error: code => page.evaluate(code => { const r = window.__live().at(-1); r.onerror({ error: code }); }, code),
     liveCount: () => page.evaluate(() => window.__live().length),
     recCount: () => page.evaluate(() => window.__recs.length),
     twoLive: () => page.evaluate(() => !!window.__twoLive),
-    lines: () => page.$$eval('.seg', ns => ns.map(n => ({ en: n.querySelector('.en').textContent, ja: n.querySelector('.ja').textContent }))),
+    lines: () => page.$$eval('#log > .seg', ns => ns.map(n => ({ en: n.querySelector('.en').textContent, ja: n.querySelector('.ja').textContent }))),
     status: () => page.textContent('#status'),
     start: async () => { await page.click('#toggle'); await page.clock.runFor(100); },
   };
@@ -198,6 +213,70 @@ test('Android は1文ごとの方式で動き、同じ文の重複を1回にま�
   return t;
 });
 
+test('iPhone/iPad：確定済みの文が送り直されても、同じ文を二度出さない', async b => {
+  const t = await open(b, { ua: IPAD_UA });
+  await t.start();
+  await t.raw([['会議を始めます', true]]);
+  await t.raw([['会議を始めます', true], ['次は', false]]);          // 番号0のまま全部送り直してくる
+  await t.raw([['会議を始めます', true], ['次は夜勤の話です', true]]);
+  await t.raw([['会議を始めます', true], ['次は夜勤の話です', true]]);
+  await t.tick(50);
+  assert.deepStrictEqual((await t.lines()).map(l => l.ja), ['会議を始めます', '次は夜勤の話です']);
+  return t;
+});
+
+test('Android：確信度0の「確定」は途中経過として扱い、細切れの文を出さない', async b => {
+  const t = await open(b, { ua: ANDROID_UA });
+  await t.start();
+  await t.raw([['それでは', true, 0]]);
+  await t.raw([['それでは会議を', true, 0]]);
+  assert.strictEqual((await t.lines()).length, 0);
+  assert.strictEqual(await t.page.textContent('#liveJa'), 'それでは会議を');
+  await t.raw([['それでは会議を始めます', true, 0.92]]);
+  await t.tick(50);
+  assert.deepStrictEqual((await t.lines()).map(l => l.ja), ['それでは会議を始めます']);
+  return t;
+});
+
+test('Android：確信度0のまま終わっても、その文を取りこぼさない', async b => {
+  const t = await open(b, { ua: ANDROID_UA });
+  await t.start();
+  await t.raw([['休憩にしましょう', true, 0]]);
+  await t.endByItself(); await t.tick(200);
+  assert.deepStrictEqual((await t.lines()).map(l => l.ja), ['休憩にしましょう']);
+  return t;
+});
+
+test('一瞬で終わる失敗が続くときは、再開の間隔を空ける', async b => {
+  const t = await open(b, { ua: ANDROID_UA });
+  await t.start();
+  for (const wait of [100, 600, 1100, 2100, 4100]) { await t.endByItself(); await t.tick(wait); }
+  await t.endByItself();
+  await t.tick(1000);
+  assert.strictEqual(await t.liveCount(), 0, '失敗が続いたあとは、すぐには作り直さない');
+  await t.tick(4000);
+  assert.strictEqual(await t.liveCount(), 1, '少し待ってから再開する');
+  await t.say([['聞こえました', true]]); await t.endByItself(); await t.tick(200);
+  assert.strictEqual(await t.liveCount(), 1, '聞き取れたら、またすぐ再開する動きに戻る');
+  return t;
+});
+
+test('動いていたのに途中で断られたら、止めずに「タップで再開」にする', async b => {
+  const t = await open(b, { ua: IPAD_UA });
+  await t.start();
+  await t.say([['会議を始めます', true]]);
+  await t.error('not-allowed');
+  await t.tick(8000);
+  assert.match(await t.status(), /タップで再開/);
+  assert.strictEqual(await t.liveCount(), 0, '勝手には作り直さない');
+  await t.page.click('#log');
+  await t.tick(200);
+  assert.strictEqual(await t.liveCount(), 1);
+  assert.match(await t.status(), /翻訳中/);
+  assert.strictEqual((await t.lines()).length, 1, '履歴は残っている');
+  return t;
+});
+
 test('Google翻訳が使えないときは予備の翻訳に切り替える', async b => {
   const t = await open(b, { ua: IPAD_UA, googleFails: true });
   await t.start();
@@ -209,8 +288,8 @@ test('Google翻訳が使えないときは予備の翻訳に切り替える', as
 
 test('マイクが許可されないときは止まって説明を出す', async b => {
   const t = await open(b, { ua: IPAD_UA });
+  await t.page.evaluate(() => { window.__deny = true; });
   await t.start();
-  await t.error('not-allowed');
   await t.tick(3000);
   assert.match(await t.status(), /マイク不可/);
   assert.strictEqual(await t.liveCount(), 0);
