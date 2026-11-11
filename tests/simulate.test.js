@@ -11,8 +11,8 @@ const DESKTOP_LINUX_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KH
 const IPAD_UA = 'Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
 
 // にせの音声認識と翻訳を差し込む。translate=fail で Google 翻訳の失敗をまねる
-function fakes({ noSR = false, googleFails = false } = {}) {
-  return ({ noSR, googleFails }) => {
+function fakes() {
+  return ({ noSR, googleFails, published }) => {
     window.__recs = [];
     window.__urls = [];
     class FakeSR {
@@ -34,6 +34,7 @@ function fakes({ noSR = false, googleFails = false } = {}) {
     else { window.SpeechRecognition = FakeSR; window.webkitSpeechRecognition = FakeSR; }
     window.fetch = async u => {
       u = String(u); window.__urls.push(u);
+      if (u.includes('package.json')) return { ok: true, json: async () => ({ version: published || '0.0.0' }) };
       const q = decodeURIComponent(u.split('q=')[1]);
       if (u.includes('googleapis')) {
         if (googleFails) return { ok: false, status: 429 };
@@ -108,6 +109,25 @@ test('停止したあとも版の番号が残る', async b => {
   await t.start(); await t.tick(2100);
   await t.page.click('#toggle');
   assert.match(await t.page.textContent('#diag'), /^v\d+\.\d+\.\d+$/);
+  return t;
+});
+
+test('使っている最中に新しい版が出たら、勝手に入れ替えず「新しい版があります」と知らせる', async b => {
+  const t = await open(b, { ua: ANDROID_UA, published: '99.0.0' });
+  await t.tick(100);
+  // 開いた直後（停止中・履歴なし）は一度だけ自動で読み込み直す。直ったあとは帯で知らせる
+  await t.page.waitForFunction(() => !document.getElementById('update').hidden);
+  assert.match(await t.page.textContent('#update'), /v99\.0\.0/);
+  const loads = await t.page.evaluate(() => window.__urls.filter(u => u.includes('package.json')).length);
+  assert.strictEqual(loads, 1, '読み込み直したあとは、同じ版のために空回りしない');
+  return t;
+});
+
+test('公開中の版が同じなら、何も出さない', async b => {
+  const t = await open(b, { ua: ANDROID_UA });
+  await t.tick(100);
+  assert.strictEqual(await t.page.isVisible('#update'), false);
+  assert.ok(await t.page.isVisible('#androidTip'), 'Android では開始音の止め方を表示する');
   return t;
 });
 

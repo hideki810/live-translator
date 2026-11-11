@@ -75,6 +75,9 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
 #msg{font-size:13px;color:var(--danger);margin-top:6px}
 .labelrow{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 #diag{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+#update{background:var(--accent);color:var(--accent-fg);padding-block:10px;display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;font-size:14px;line-height:1.5}
+#update button{background:var(--panel);color:var(--fg);border-color:var(--panel);font-weight:600}
+#androidTip{margin-top:10px}
 #report{background:var(--panel);border-bottom:1px solid var(--line);padding-block:12px;display:grid;gap:8px}
 #report p{margin:0;font-size:13px;color:var(--muted);line-height:1.6}
 #report textarea{font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;width:100%;min-height:180px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--fg);padding:8px 10px}
@@ -106,6 +109,11 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
   </div>
 </header>
 
+<section id="update" class="wrap" hidden>
+  <span>新しい版（<b id="updateVer"></b>）があります。更新すると、いまの履歴は消えます。必要なら先に「保存」を押してください。</span>
+  <button id="updateBtn" type="button">更新する</button>
+</section>
+
 <section id="report" class="wrap" hidden>
   <p id="reportNote">不具合のときは、下の内容をコピーしてClaudeとのチャットに貼り付けてください。原因を調べるのに使います（会議の内容は入りません）。</p>
   <textarea id="reportText" readonly aria-label="診断情報"></textarea>
@@ -116,6 +124,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
   <div class="empty" id="empty">
     <b>「▶ 開始」を一度押すだけで、会議が終わるまで聞き取りと翻訳を続けます。</b><br>
     途中で音声認識が切れても自動で再開します。iPad・スマホは充電ケーブルにつなぎ、話す人の近くに置いてください。
+    <div id="androidTip" hidden><b>「ポン」という音が気になるとき：</b>この音はAndroid自身が鳴らすもので、アプリからは消せません。音量ボタンを押して、<b>メディアの音量を0</b>にしてください（鳴り続けるときは、マナーモードにもしてください）。</div>
     <div class="sample"><small>表示例 / EXAMPLE</small>
       <div class="seg"><div class="en">Let's start today's meeting. First, about the night-shift handover.</div>
       <div class="ja">それでは今日の会議を始めます。まず夜勤の申し送りについてです。</div></div>
@@ -153,7 +162,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
   // 静かな間に何度も作り直すと Android では毎回「ポン」と開始音が鳴る。何か聞き取れたら7秒に戻す
   const STALL_STEPS = [7000, 20000, 45000, 60000];
   const HUNG_MS = 4000;      // 起動の合図がこの時間来なければ作り直す
-  const VERSION = '1.7.0';   // 変更したら上げる（画面下と診断情報に出る）
+  const VERSION = '1.7.1';   // 変更したら上げる（画面下と診断情報に出る）
 
   let running = false, rec = null, active = false, restartTimer = null;
   let lastAlive = 0, lastHeard = 0, restarts = 0, firstRec = false, stallLevel = 0;
@@ -493,6 +502,38 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     setTimeout(() => { $('copyReport').textContent = 'コピー'; }, 2500);
   };
   $('closeReport').onclick = () => { $('report').hidden = true; };
+
+  if (IS_ANDROID) $('androidTip').hidden = false;
+
+  // ---------- 新しい版の確認 ----------
+  // 開いたままの画面には新しい版が入らないので、ときどき公開中の版の番号を見に行く。
+  // 使っていないとき（停止中で履歴なし）は自動で入れ替え、使っている最中は知らせるだけにする
+  const isNewer = (a, b) => {
+    const x = a.split('.').map(Number), y = b.split('.').map(Number);
+    for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); }
+    return false;
+  };
+  async function checkUpdate() {
+    try {
+      const r = await fetch('package.json?t=' + Date.now(), { cache: 'no-store' });
+      if (!r.ok) return;
+      const v = (await r.json()).version;
+      if (typeof v !== 'string' || !isNewer(v, VERSION)) return;
+      // 同じ版のために何度も読み込み直さない（公開の反映が遅れているときの空回りを防ぐ）
+      const tried = (() => { try { return sessionStorage.getItem('lt-reload'); } catch (e) { return v; } })();
+      if (!running && !segments.length && tried !== v) {
+        try { sessionStorage.setItem('lt-reload', v); } catch (e) {}
+        location.reload();
+        return;
+      }
+      $('updateVer').textContent = 'v' + v;
+      $('update').hidden = false;
+    } catch (e) {}
+  }
+  $('updateBtn').onclick = () => location.reload();
+  checkUpdate();
+  setInterval(checkUpdate, 10 * 60 * 1000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkUpdate(); });
 
   // ホーム画面にインストールできるようにする（https で開いたときだけ動く）
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
