@@ -297,10 +297,10 @@ test('静かな間は作り直す間隔を延ばし、聞き取れたら7秒に�
   const n0 = await t.recCount();
   await t.tick(8100);
   assert.strictEqual(await t.recCount(), n0 + 1, '最初は7秒ほどで作り直す');
-  await t.tick(18900);   // 開始から約27秒
-  assert.strictEqual(await t.recCount(), n0 + 1, '2回目は20秒待つので、まだ作り直さない');
-  await t.tick(3000);    // 開始から約30秒
-  assert.strictEqual(await t.recCount(), n0 + 2, '20秒待ったあとで作り直す');
+  await t.tick(8000);    // 開始から約16秒
+  assert.strictEqual(await t.recCount(), n0 + 1, '2回目は10秒待つので、まだ作り直さない');
+  await t.tick(3500);    // 開始から約19.6秒
+  assert.strictEqual(await t.recCount(), n0 + 2, '10秒待ったあとで作り直す');
   await t.say([['はい', true]]);
   const n1 = await t.recCount();
   await t.tick(6500);

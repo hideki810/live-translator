@@ -157,12 +157,14 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
   const SILENCE_MS = IS_ANDROID ? 3000 : 1800;
   const MAX_CHARS = 120;     // 長すぎる文は途中で区切って確定
   const INTERIM_MS = 1500;   // 話している途中の仮翻訳の間隔
-  // 認識中なのに何も届かなければ作り直す。待つ時間は作り直すたびに 7→20→45→60秒 と延ばす。
+  // 認識中なのに何も届かなければ作り直す。待つ時間は作り直すたびに 7→10→15→30秒 と延ばす。
   // 話している最中に固まったらすぐ直したいが（実機の録画で10〜20秒止まることがあった）、
   // 静かな間に何度も作り直すと Android では毎回「ポン」と開始音が鳴る。何か聞き取れたら7秒に戻す
-  const STALL_STEPS = [7000, 20000, 45000, 60000];
+  // （v1.7.1の実機録画：話し声が続いているのに、2回目の20秒待ちのあいだ17秒何も届かなかった。
+  //   開始音はマナーモードで消せると分かったので、聞き逃しを減らすほうを優先して間隔を詰めた）
+  const STALL_STEPS = [7000, 10000, 15000, 30000];
   const HUNG_MS = 4000;      // 起動の合図がこの時間来なければ作り直す
-  const VERSION = '1.7.1';   // 変更したら上げる（画面下と診断情報に出る）
+  const VERSION = '1.7.2';   // 変更したら上げる（画面下と診断情報に出る）
 
   let running = false, rec = null, active = false, restartTimer = null;
   let lastAlive = 0, lastHeard = 0, restarts = 0, firstRec = false, stallLevel = 0;
