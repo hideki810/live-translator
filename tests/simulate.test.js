@@ -419,7 +419,8 @@ test('停止を押すと認識が止まり、再開しない', async b => {
 });
 
 (async () => {
-  const browser = await chromium.launch();
+  // GitHub上では、最初から入っている Chrome を使う（テスト用ブラウザのダウンロードが止まることがあったため）
+  const browser = await chromium.launch(process.env.CI ? { channel: 'chrome' } : {});
   let failed = 0;
   for (const { name, fn } of tests) {
     try {
