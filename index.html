@@ -136,9 +136,11 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
   const $ = id => document.getElementById(id);
   const logEl = $('log'), liveEn = $('liveEn'), liveJa = $('liveJa');
 
-  // Android版Chromeは連続モードで同じ文が重複して届く不具合があるため、
-  // 1文ごとに認識を終わらせてすぐ再開する方式に切り替える
-  const IS_ANDROID = /Android/i.test(navigator.userAgent);
+  // Android のタブレットは「パソコン（Linux）」と名乗ることがあるので、タッチ画面の有無でも見分ける
+  // （実機の録画で、Android タブレットの Chrome が「Android」を名乗らず、別の方式で動いていた）
+  const UA = navigator.userAgent;
+  const IS_ANDROID = /Android/i.test(UA) || navigator.userAgentData?.platform === 'Android'
+    || (/X11|Linux x86_64/.test(UA) && navigator.maxTouchPoints > 0 && !/CrOS/.test(UA));
   // iPadOS は「Mac」と名乗ることがあるので、タッチ画面の有無でも見分ける
   const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   // 無音がこの時間続いたら1文として確定する。
@@ -146,15 +148,15 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
   const SILENCE_MS = IS_ANDROID ? 3000 : 1800;
   const MAX_CHARS = 120;     // 長すぎる文は途中で区切って確定
   const INTERIM_MS = 1500;   // 話している途中の仮翻訳の間隔
-  // 認識中なのにこの時間何も届かなければ作り直す。
-  // Android では、話し声が続いているのに認識が何も返さず固まることが実機の録画で分かった（v1.4.0で10〜20秒止まっていた）。
-  // 作り直しは一瞬なので、短めにして聞き逃しを減らす
-  const STALL_MS = IS_ANDROID ? 6000 : 8000;
+  // 認識中なのに何も届かなければ作り直す。待つ時間は作り直すたびに 7→20→45→60秒 と延ばす。
+  // 話している最中に固まったらすぐ直したいが（実機の録画で10〜20秒止まることがあった）、
+  // 静かな間に何度も作り直すと Android では毎回「ポン」と開始音が鳴る。何か聞き取れたら7秒に戻す
+  const STALL_STEPS = [7000, 20000, 45000, 60000];
   const HUNG_MS = 4000;      // 起動の合図がこの時間来なければ作り直す
-  const VERSION = '1.6.0';   // 変更したら上げる（画面下と診断情報に出る）
+  const VERSION = '1.7.0';   // 変更したら上げる（画面下と診断情報に出る）
 
   let running = false, rec = null, active = false, restartTimer = null;
-  let lastAlive = 0, lastHeard = 0, restarts = 0;
+  let lastAlive = 0, lastHeard = 0, restarts = 0, firstRec = false, stallLevel = 0;
   let everWorked = false, needTap = false, quickFails = 0;
   let interim = '', silenceTimer = null, lastInterimSent = '', interimSeq = 0;
   let wakeLock = null, segments = [], lastCommit = { text: '', at: 0 };
@@ -241,12 +243,24 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
     silenceTimer = setTimeout(forceCommit, SILENCE_MS);
   }
 
-  // 一部の端末(iPhone/iPad)は「確定」を返さないことがあるため、無音で区切って確定し、認識を作り直す
+  // 無音か長すぎる文で、確定を待たずに区切って確定する。
+  // iPhone/iPad は「確定」を返さないことがあるので、確定したら認識を作り直す（開始音が鳴らないので問題ない）。
+  // それ以外（Android など）は作り直すと毎回開始音が鳴るので、認識はそのまま続ける（先に確定した分を softText に覚えておく）
   function forceCommit() {
     clearTimeout(silenceTimer);
     if (!interim) return;
-    commit(interim);
-    startRec();
+    if (IS_IOS) { commit(interim); startRec(); return; }
+    const r = rec, t = interim;
+    commit(t);
+    if (r) { r.softText += t; note('soft-commit'); }
+  }
+
+  // 先に確定した分（soft）を除いた、残りの文字を返す
+  function remainder(text, soft) {
+    if (!soft) return text;
+    if (text.startsWith(soft)) return text.slice(soft.length);
+    // 認識が前の言葉を言い直したときは、文字数で切る
+    return text.length > soft.length ? text.slice(soft.length) : '';
   }
 
   // 話している途中の仮翻訳（間引いて送る）
@@ -276,9 +290,13 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
   function startRec() {
     clearTimeout(restartTimer); restartTimer = null;
     if (!running) return;
+    // 作り直した回数を数える（開始してから最初の1回は数えない）
+    if (firstRec) firstRec = false; else restarts++;
     killRec();
     const r = new SR();
-    r.lang = 'ja-JP'; r.continuous = !IS_ANDROID; r.interimResults = true; r.maxAlternatives = 1;
+    // どの端末も連続モード。作り直すたびに Android は開始音が鳴るので、1つの認識をなるべく長く使う
+    // （Android タブレットの実機で、1つの認識が35秒続き、確定した文を3つ返したことを確認済み）
+    r.lang = 'ja-JP'; r.continuous = true; r.interimResults = true; r.maxAlternatives = 1;
     r.onstart = () => {
       if (rec !== r) return;
       active = true; everWorked = true; lastAlive = lastHeard = Date.now();
@@ -295,19 +313,26 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
       if (!r.gotResult) { r.gotResult = true; note('result'); }
       lastAlive = lastHeard = Date.now();
       quickFails = 0;
+      if (stallLevel) { stallLevel = 0; note('watchdog: level 0'); }
       // 端末ごとの癖に左右されないよう、「この回の認識で何番目まで確定したか」を自分で数える。
       // （iPhone/iPad は確定済みの文をもう一度送ってくることがあり、番号を信じると同じ文が何度も出る）
-      let tmp = '';
-      for (let i = 0; i < e.results.length; i++) {
+      let acc = '';   // この回の、まだ確定していない発話の文字（確定の区切りから積み上げる）
+      for (let i = r.nextFinal; i < e.results.length; i++) {
         const res = e.results[i];
-        const text = res[0].transcript;
+        const raw = res[0].transcript;
         // Android には、話している途中の結果を「確定・確信度0」で送ってくる機種がある。途中経過として扱う
         const final = res.isFinal && !(IS_ANDROID && res[0].confidence === 0);
-        if (i < r.nextFinal) continue;
-        if (final) { commit(text); r.nextFinal = i + 1; }
-        else tmp += text;
+        // 古いAndroidの癖：確定した文が「前の確定文＋続き」の形で積み上がって届く → 続きだけを使う
+        let text = raw;
+        if (r.lastFinalRaw.length >= 4 && raw.startsWith(r.lastFinalRaw)) text = raw.slice(r.lastFinalRaw.length);
+        acc += text;
+        if (final) {
+          // 無音で先に確定した分は除いて、残りだけを確定する（同じ言葉を二度出さない）
+          commit(remainder(acc, r.softText));
+          r.softText = ''; acc = ''; r.nextFinal = i + 1; r.lastFinalRaw = raw;
+        }
       }
-      onInterim(tmp);
+      onInterim(remainder(acc, r.softText));
     };
     r.onerror = e => {
       if (rec !== r) return;
@@ -341,18 +366,17 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
       note('onend');
       if (interim) commit(interim);
       if (!running) return;
-      restarts++;
       if (!IS_ANDROID) setStatus('restart', '再接続中…');
       // 何も聞き取れないまま一瞬で終わることが続くときは、再開の間隔を少しずつ空ける
       // （通信やマイクの不調のときに、休みなく作り直して電池と通信を使い続けないため）
       const quick = !r.gotResult && Date.now() - r.startedAt < 1500;
       quickFails = quick ? quickFails + 1 : 0;
-      // Android は1文ごとに終わるのが正常なので、ふだんはすぐ再開する
+      // Android は話の切れ目で終わることがあるので、ふだんはすぐ再開する
       const base = IS_ANDROID ? 50 : 250;
       scheduleStart([base, base, 500, 1000, 2000, 4000][Math.min(quickFails, 5)]);
     };
     rec = r;
-    r.nextFinal = 0; r.startedAt = Date.now();
+    r.nextFinal = 0; r.softText = ''; r.lastFinalRaw = ''; r.startedAt = Date.now();
     lastAlive = Date.now();
     try { r.start(); } catch (e) { note('start-threw ' + e.name); rec = null; scheduleStart(1000); }
   }
@@ -364,8 +388,9 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
       if (!document.hidden && !needTap) {
         if (!rec && !restartTimer) { note('watchdog: not running'); startRec(); }                         // 再開し損ねている
         else if (rec && !active && now - lastAlive > HUNG_MS) { note('watchdog: start hung'); startRec(); } // 起動したまま固まっている
-        else if (rec && active && !interim && now - lastHeard > STALL_MS) {                              // 聞こえなくなっている
-          note('watchdog: stalled ' + Math.round((now - lastHeard) / 1000) + 's'); restarts++; startRec();
+        else if (rec && active && !interim && now - lastHeard > STALL_STEPS[stallLevel]) {               // 聞こえなくなっている
+          stallLevel = Math.min(stallLevel + 1, STALL_STEPS.length - 1);   // 次は少し長く待つ
+          note('watchdog: stalled ' + Math.round((now - lastHeard) / 1000) + 's (level ' + stallLevel + ')'); startRec();
         }
       }
       const ago = lastHeard ? Math.round((now - lastHeard) / 1000) : 0;
@@ -385,7 +410,7 @@ footer{background:var(--panel);border-top:2px solid var(--live);padding-block:12
         : 'このブラウザは音声認識に対応していません。iPad/iPhoneはSafari、AndroidはChromeで開いてください。');
       return;
     }
-    running = true; restarts = 0; lastHeard = Date.now(); needTap = false; quickFails = 0;
+    running = true; restarts = 0; firstRec = true; stallLevel = 0; lastHeard = Date.now(); needTap = false; quickFails = 0;
     startedAt = Date.now(); events.length = 0; note('start (android=' + IS_ANDROID + ')');
     $('toggle').textContent = '■ 停止'; $('toggle').classList.add('running');
     setStatus('restart', '起動中…');

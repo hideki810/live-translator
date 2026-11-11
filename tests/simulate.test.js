@@ -6,6 +6,8 @@ const assert = require('assert');
 
 const PAGE = 'file://' + path.resolve(__dirname, '..', 'index.html');
 const ANDROID_UA = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Mobile Safari/537.36';
+// 「パソコン（Linux）」と名乗る Android タブレットの Chrome（実機の録画で確認した形）
+const DESKTOP_LINUX_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
 const IPAD_UA = 'Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
 
 // にせの音声認識と翻訳を差し込む。translate=fail で Google 翻訳の失敗をまねる
@@ -42,8 +44,9 @@ function fakes({ noSR = false, googleFails = false } = {}) {
   };
 }
 
-async function open(browser, { ua, ...opts } = {}) {
-  const page = await browser.newPage({ viewport: { width: 400, height: 800 }, userAgent: ua });
+// touch=true でタッチ画面のある端末をまねる
+async function open(browser, { ua, touch = false, ...opts } = {}) {
+  const page = await browser.newPage({ viewport: { width: 400, height: 800 }, userAgent: ua, hasTouch: touch });
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
   await page.clock.install();
@@ -64,6 +67,8 @@ async function open(browser, { ua, ...opts } = {}) {
       const results = r.__finals.concat(items.map(mk));
       r.__finals = results.filter(x => x.isFinal);
       r.onresult({ resultIndex: first, results });
+      // 本物と同じく、連続モードでないときは文が確定したらその回の認識が終わる
+      if (r.continuous === false && items.some(x => x[1])) setTimeout(() => { if (r.state === 'live') { r.state = 'dead'; r.onend && r.onend(); } }, 10);
     }, items),
     // 端末の癖をまねるため、結果の並びと番号をそのまま指定して届ける。[文字, 確定か, 確信度]
     raw: (items, resultIndex = 0) => page.evaluate(({ items, resultIndex }) => {
@@ -200,16 +205,103 @@ test('認識が2つ同時に動くことがない（再開と見張りが重な�
   return t;
 });
 
-test('Android は1文ごとの方式で動き、同じ文の重複を1回にまとめる', async b => {
+test('Android も連続モードで動き、同じ文の重複を1回にまとめる', async b => {
   const t = await open(b, { ua: ANDROID_UA });
   await t.start();
-  assert.strictEqual(await t.page.evaluate(() => window.__live().at(-1).continuous), false);
+  assert.strictEqual(await t.page.evaluate(() => window.__live().at(-1).continuous), true);
   await t.say([['会議を始めます', true]]); await t.endByItself(); await t.tick(200);
   await t.say([['会議を始めます', true]]); await t.endByItself(); await t.tick(200);
   await t.error('no-speech'); await t.endByItself(); await t.tick(200);
   await t.say([['次は申し送りです', true]]); await t.endByItself(); await t.tick(200);
   assert.deepStrictEqual((await t.lines()).map(l => l.ja), ['会議を始めます', '次は申し送りです']);
   assert.strictEqual(await t.liveCount(), 1);
+  return t;
+});
+
+test('Android：1つの認識で3つの文が確定しても、作り直さない（開始音を減らす）', async b => {
+  const t = await open(b, { ua: ANDROID_UA });
+  await t.start();
+  const before = await t.recCount();
+  await t.say([['会議を始めます', true]]); await t.tick(1000);
+  await t.say([['次は夜勤の', false]]); await t.tick(1000);
+  await t.say([['次は夜勤の申し送りです', true]]); await t.tick(1000);
+  await t.say([['以上です', true]]); await t.tick(1000);
+  assert.deepStrictEqual((await t.lines()).map(l => l.ja), ['会議を始めます', '次は夜勤の申し送りです', '以上です']);
+  assert.strictEqual(await t.recCount(), before, '文の区切りで作り直していない');
+  assert.strictEqual(await t.liveCount(), 1);
+  return t;
+});
+
+test('Android：無音で先に確定しても作り直さず、あとから届いた確定は続きの言葉だけを出す', async b => {
+  const t = await open(b, { ua: ANDROID_UA });
+  await t.start();
+  const before = await t.recCount();
+  await t.say([['次は夜勤の', false]]);
+  await t.tick(3200);
+  assert.deepStrictEqual((await t.lines()).map(l => l.ja), ['次は夜勤の']);
+  assert.strictEqual(await t.recCount(), before, '無音の区切りで作り直していない');
+  assert.strictEqual(await t.liveCount(), 1);
+  await t.raw([['次は夜勤の申し送りです', true, 0.9]]);
+  assert.deepStrictEqual((await t.lines()).map(l => l.ja), ['次は夜勤の', '申し送りです']);
+  await t.raw([['次は夜勤の申し送りです', true, 0.9], ['以上です', true, 0.9]]);
+  await t.tick(50);
+  assert.deepStrictEqual((await t.lines()).map(l => l.ja), ['次は夜勤の', '申し送りです', '以上です']);
+  return t;
+});
+
+test('iPad：無音で確定したら、これまでどおり認識を作り直す', async b => {
+  const t = await open(b, { ua: IPAD_UA });
+  await t.start();
+  const before = await t.recCount();
+  await t.say([['次は夜勤の', false]]);
+  await t.tick(2000);
+  assert.strictEqual((await t.lines()).length, 1);
+  assert.strictEqual(await t.recCount(), before + 1, '作り直した');
+  assert.strictEqual(await t.liveCount(), 1);
+  return t;
+});
+
+test('Android：確定した文が「前の文＋続き」で積み上がって届いても、続きだけを出す', async b => {
+  const t = await open(b, { ua: ANDROID_UA });
+  await t.start();
+  await t.raw([['今日の会議を', true, 0.9]]);
+  await t.raw([['今日の会議を', true, 0.9], ['今日の会議を始めます', true, 0.9]]);
+  await t.tick(50);
+  assert.deepStrictEqual((await t.lines()).map(l => l.ja), ['今日の会議を', '始めます']);
+  return t;
+});
+
+test('静かな間は作り直す間隔を延ばし、聞き取れたら7秒に戻す', async b => {
+  const t = await open(b, { ua: ANDROID_UA });
+  await t.start();
+  const n0 = await t.recCount();
+  await t.tick(8100);
+  assert.strictEqual(await t.recCount(), n0 + 1, '最初は7秒ほどで作り直す');
+  await t.tick(18900);   // 開始から約27秒
+  assert.strictEqual(await t.recCount(), n0 + 1, '2回目は20秒待つので、まだ作り直さない');
+  await t.tick(3000);    // 開始から約30秒
+  assert.strictEqual(await t.recCount(), n0 + 2, '20秒待ったあとで作り直す');
+  await t.say([['はい', true]]);
+  const n1 = await t.recCount();
+  await t.tick(6500);
+  assert.strictEqual(await t.recCount(), n1, '聞き取れた直後は作り直さない');
+  await t.tick(1600);
+  assert.strictEqual(await t.recCount(), n1 + 1, '聞き取れたあとは、また7秒ほどで作り直す');
+  assert.strictEqual(await t.liveCount(), 1);
+  return t;
+});
+
+test('「パソコン」と名乗る Android タブレットも Android として扱う', async b => {
+  const t = await open(b, { ua: DESKTOP_LINUX_UA, touch: true });
+  assert.ok(await t.page.evaluate(() => navigator.maxTouchPoints > 0), 'タッチ画面がある');
+  await t.page.click('#diagBtn');
+  assert.match(await t.page.inputValue('#reportText'), /方式: Android/);
+  const pc = await open(b, { ua: DESKTOP_LINUX_UA });
+  assert.strictEqual(await pc.page.evaluate(() => navigator.maxTouchPoints), 0);
+  await pc.page.click('#diagBtn');
+  assert.match(await pc.page.inputValue('#reportText'), /方式: 標準/, 'タッチ画面のないパソコンは Android ではない');
+  assert.deepStrictEqual(pc.errors, []);
+  await pc.page.close();
   return t;
 });
 
